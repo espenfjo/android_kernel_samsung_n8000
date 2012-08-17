@@ -16,6 +16,9 @@
 #include <linux/usb.h>
 #include <linux/usb/serial.h>
 #include <linux/slab.h>
+#ifdef CONFIG_MDM_HSIC_PM
+#include <linux/wakelock.h>
+#endif
 #include "usb-wwan.h"
 
 #define DRIVER_AUTHOR "Qualcomm Inc"
@@ -86,9 +89,13 @@ static const struct usb_device_id id_table[] = {
 	{USB_DEVICE(0x05c6, 0x9204)},	/* Gobi 2000 QDL device */
 	{USB_DEVICE(0x05c6, 0x9205)},	/* Gobi 2000 Modem device */
 	{USB_DEVICE(0x1199, 0x9013)},	/* Sierra Wireless Gobi 3000 Modem device (MC8355) */
+	{USB_DEVICE(0x05c6, 0x9048)},	/* MDM9x15 device */
+	{USB_DEVICE(0x05c6, 0x904C)},	/* MDM9x15 device */
 	{ }				/* Terminating entry */
 };
 MODULE_DEVICE_TABLE(usb, id_table);
+
+#define EFS_SYNC_IFC_NUM	2
 
 static struct usb_driver qcdriver = {
 	.name			= "qcserial",
@@ -97,9 +104,13 @@ static struct usb_driver qcdriver = {
 	.id_table		= id_table,
 	.suspend		= usb_serial_suspend,
 	.resume			= usb_serial_resume,
+	.reset_resume		= usb_serial_resume,
 	.supports_autosuspend	= true,
 };
 
+#ifdef CONFIG_MDM_HSIC_PM
+static struct wake_lock mdm_boot;
+#endif
 static int qcprobe(struct usb_serial *serial, const struct usb_device_id *id)
 {
 	struct usb_wwan_intf_private *data;
@@ -121,9 +132,17 @@ static int qcprobe(struct usb_serial *serial, const struct usb_device_id *id)
 		return -ENOMEM;
 
 	spin_lock_init(&data->susp_lock);
+#ifdef CONFIG_MDM_HSIC_PM
+	if (id->idVendor == 0x05c6 && id->idProduct == 0x9008)
+		wake_lock(&mdm_boot);
 
+	if (id->idVendor == 0x05c6 &&
+			(id->idProduct == 0x9008 || id->idProduct == 0x9048 ||
+					id->idProduct == 0x904c))
+		goto set_interface;
 	usb_enable_autosuspend(serial->dev);
-
+set_interface:
+#endif
 	switch (nintf) {
 	case 1:
 		/* QDL mode */
@@ -201,6 +220,14 @@ static int qcprobe(struct usb_serial *serial, const struct usb_device_id *id)
 		}
 		break;
 
+	case 9:
+		if (ifnum != EFS_SYNC_IFC_NUM) {
+			kfree(data);
+			break;
+		}
+
+		retval = 0;
+		break;
 	default:
 		dev_err(&serial->dev->dev,
 			"unknown number of interfaces: %d\n", nintf);
@@ -224,6 +251,9 @@ static void qc_release(struct usb_serial *serial)
 	usb_wwan_release(serial);
 	usb_set_serial_data(serial, NULL);
 	kfree(priv);
+#ifdef CONFIG_MDM_HSIC_PM
+	wake_unlock(&mdm_boot);
+#endif
 }
 
 static struct usb_serial_driver qcdevice = {
@@ -263,7 +293,9 @@ static int __init qcinit(void)
 		usb_serial_deregister(&qcdevice);
 		return retval;
 	}
-
+#ifdef CONFIG_MDM_HSIC_PM
+	wake_lock_init(&mdm_boot, WAKE_LOCK_SUSPEND, "mdm_boot");
+#endif
 	return 0;
 }
 
